@@ -1,5 +1,7 @@
 # BNMB provisioning broker (ActiveMQ Artemis)
 
+Place `broker.p12` at ./certs folder here before running `docker build`.
+
 The broker that carries provisioning events (`USER_CREATED`, `USER_DEACTIVATED`, `SMS`,
 `EMAIL`) from backoffice into this gateway. Everything the broker needs is in this
 directory, so it can be rebuilt identically on any machine instead of being hand-patched
