@@ -1,159 +1,82 @@
-# BNMB provisioning broker (ActiveMQ Artemis)
+# BNMB Provisioning Broker — ActiveMQ Artemis
 
-Place `broker.p12` at ./certs folder here before running `docker build`.
+## Setup and Deployment Guide
 
-The broker that carries provisioning events (`USER_CREATED`, `USER_DEACTIVATED`, `SMS`,
-`EMAIL`) from backoffice into this gateway. Everything the broker needs is in this
-directory, so it can be rebuilt identically on any machine instead of being hand-patched
-inside a running container.
+### 1. Clone the Repository
 
-```
-docker/
-  Dockerfile           image = stock Artemis + our config + TLS keystore
-  docker-compose.yml   how to run it
-  config/broker.xml    acceptors, queues, address-settings
-  certs/broker.p12     TLS keystore - NOT in git, you place it (see below)
-```
-
-## Before the first build: place the keystore
-
-`docker/certs/broker.p12` is gitignored, because it holds the broker's private key.
-Copy the one that was generated for this environment:
+Clone the repository and navigate to the project directory:
 
 ```bash
-cp /d/abdul_khaliq/projects/BNMB/certs/broker.p12 docker/certs/broker.p12
+git clone <repository-url>
+cd <project-directory>
 ```
 
-If you need a new one (expiry, new host, different SAN):
+### 2. Configure the TLS Certificate
 
-```bash
-keytool -genkeypair -alias broker -keyalg RSA -keysize 2048 -validity 825 \
-  -storetype PKCS12 -keystore broker.p12 \
-  -dname "CN=bnmb-artemis, OU=IT, O=BNMB, L=Khartoum, C=SD" \
-  -ext "SAN=IP:192.168.100.142,IP:127.0.0.1,DNS:localhost,DNS:artemis" \
-  -storepass '<password>'
+* Copy the client-provided `.p12` certificate into the `certs/` folder.
+* Ensure that the certificate password is available.
+* The certificate must be valid and approved for the intended environment.
 
-# clients need the certificate, not the key
-keytool -exportcert -rfc -alias broker -keystore broker.p12 -storepass '<password>' -file artemis.crt
-keytool -importcert -noprompt -alias broker -file artemis.crt \
-  -keystore client-truststore.p12 -storetype PKCS12 -storepass '<password>'
+In the `config/` folder, open `broker.xml` and verify the TLS acceptor configuration:
+
+```xml
+<acceptor name="artemis-ssl">tcp://0.0.0.0:61617?sslEnabled=true;keyStorePath=${artemis.instance}/etc/broker.p12;keyStorePassword=ENC(-35da6099f7543734b442d3b2e1759aeddd05b6572705eea3);keyStoreType=PKCS12;enabledProtocols=TLSv1.3,TLSv1.2;protocols=CORE;tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576;useEpoll=true</acceptor>
 ```
 
-The SAN list matters: a client verifying the hostname rejects the certificate if the
-address it dialled is not in there.
+This configuration enables TLS-secured connections on port `61617`.
 
-## Run it
+### 3. Create the `.env` File
 
-Secrets come from `.env`, which Compose loads automatically from this directory:
+Create a `.env` file in the project directory and configure the following properties:
 
 ```properties
-BROKER_TLS_PASSWORD=<keystore password>   # used by the healthcheck
-ARTEMIS_USER=admin
-ARTEMIS_PASSWORD=admin
+BROKER_TLS_PASSWORD=<keystore-password>
+ARTEMIS_USER=<username>
+ARTEMIS_PASSWORD=<password>
 ```
 
-`.env` is gitignored. Without `BROKER_TLS_PASSWORD` set, Compose substitutes a blank
-string and the healthcheck fails (the broker itself still starts - it just never reports
-healthy).
+### 4. Build and Run the Container
+
+The Docker image configuration is available in the `Dockerfile`.
+
+Run the following commands:
 
 ```bash
 docker compose up -d --build
 docker compose logs -f
 ```
 
-Healthy startup ends with:
+The broker will be available at:
 
+```text
+tcp://192.168.100.142:61617
 ```
-AMQ221020: Started EPOLL Acceptor at 0.0.0.0:61617 for protocols [CORE]
-AMQ221007: Server is now active
+
+The Artemis Web Console can be accessed at:
+
+```text
+http://localhost:8161/console
 ```
 
-| Port | What |
-|------|------|
-| 61617 | CORE over TLS - the only messaging port |
-| 8161  | web console, `http://localhost:8161/console` |
+### 5. Consumer Configuration
 
-## Connecting the gateway
+Any service connecting to the broker must configure the following properties:
 
 ```properties
 ARTEMIS_URL=tcp://<broker-host>:61617?sslEnabled=true;trustStorePath=/path/to/client-truststore.p12;trustStorePassword=<password>;trustStoreType=PKCS12
-ARTEMIS_USER=admin
+ARTEMIS_USER=<user>
 ARTEMIS_PASSWORD=<password>
 ```
 
-The client needs `client-truststore.p12`, never `broker.p12` — that one contains the
-private key and must not leave the broker host.
+### 6. View Queue Statistics
 
-## Design notes
-
-Three things here are easy to get wrong, and all three have bitten this setup already.
-
-**Config goes in `etc-override/`, not `etc/`.** The image entrypoint is:
+Queue statistics can be viewed through the Web Console or by running the following command inside the container:
 
 ```bash
-if ! [ -f ./etc/broker.xml ]; then
-    artemis create ...                 # also generates ./bin/artemis
-    cp ./etc-override/* ./etc
-fi
-exec ./bin/artemis run
+docker exec bnmb-artemis bash -c 'bin/artemis queue stat \
+    --url "tcp://<broker-host>:61617?sslEnabled=true;trustStorePath=/var/lib/artemis-instance/etc/broker.p12;trustStorePassword=<TLS_PASSWORD>;trustStoreType=PKCS12" \
+    --user admin \
+    --password <ARTEMIS_PASSWORD>'
 ```
 
-Writing `broker.xml` directly into `etc/` makes it skip instance creation, so `bin/artemis`
-is never generated and the container exits immediately. `etc-override/` is the supported
-hook: the instance is created first, then our files are copied over the generated ones.
-
-**Mount `data/`, never the instance root.** `/var/lib/artemis-instance` is a declared
-`VOLUME` in the base image, so a volume mounted there shadows everything baked into the
-image at that path — `broker.xml` and `broker.p12` would silently revert to stock and the
-broker would come up on plaintext 61616 with no queues. Mounting only
-`/var/lib/artemis-instance/data` keeps the split honest: **config is code** (change it here
-and rebuild), **data is state** (messages and journal survive in the volume).
-
-The Dockerfile also seeds `data/.keep` owned by `artemis`. Without it Docker creates that
-mount point root-owned, the broker cannot write `data/server.lock`, and it dies with
-`java.io.IOException: No such file or directory ... setUpServerLockFile`.
-
-**Ubuntu base, not Alpine.** `broker.xml` sets `<journal-type>ASYNCIO</journal-type>`,
-which needs `libaio` — a glibc library. On musl Artemis silently falls back to the NIO
-journal, which is slower for exactly the write-heavy workload a broker has.
-
-## Secrets
-
-The keystore password in `broker.xml` is masked, not plaintext:
-
-```
-keyStorePassword=ENC(-35da6099f7543734b442d3b2e1759aeddd05b6572705eea3)
-```
-
-Regenerate after a password change:
-
-```bash
-docker compose exec artemis ./bin/artemis mask '<new password>'
-```
-
-This is obfuscation, not encryption — it keeps the password out of plain sight in a file
-that ships inside an image anyone who can pull it can extract. It is not a substitute for
-controlling who can pull the image.
-
-Broker credentials come from the environment (`ARTEMIS_USER` / `ARTEMIS_PASSWORD`) and are
-written into `etc/artemis-users.properties` when the instance is created. The `admin/admin`
-default in `docker-compose.yml` is a laptop convenience — override it anywhere else.
-
-## Queue topology
-
-Defined in `config/broker.xml`:
-
-| Address | Purpose |
-|---------|---------|
-| `BNMB.GATEWAY.PROVISIONING` | provisioning events, ANYCAST (competing consumers) |
-| `DLQ.BNMB.GATEWAY.PROVISIONING` | its dead-letter queue |
-| `DLQ`, `ExpiryQueue` | broker defaults |
-
-`max-delivery-attempts` is 3 — deliberately low. A redelivery can re-send a real, billable
-SMS, so a poison message should dead-letter quickly rather than loop. `address-full-policy`
-is `PAGE`, so a backlog spills to disk instead of blocking producers or exhausting broker
-memory.
-
-To add a second queue (splitting notifications off provisioning, say), add the address and
-its `address-setting` here and rebuild. Both the gateway and the producer already read
-their destination from config, so no code change is needed.
+Replace the placeholders with the appropriate broker host, TLS password, and Artemis credentials.
