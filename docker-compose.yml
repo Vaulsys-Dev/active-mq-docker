@@ -1,0 +1,34 @@
+name: bnmb-broker
+
+services:
+  artemis:
+    build:
+      context: .
+    image: bnmb-artemis:2.44.0
+    container_name: bnmb-artemis
+    restart: unless-stopped
+    environment:
+      ARTEMIS_USER: ${ARTEMIS_USER:-admin}
+      ARTEMIS_PASSWORD: ${ARTEMIS_PASSWORD:-admin}
+      ANONYMOUS_LOGIN: "false"
+      EXTRA_ARGS: --http-host 0.0.0.0 --relax-jolokia
+    ports:
+      - "61617:61617"   # CORE over TLS - the only messaging port
+      - "8161:8161"     # web console (plain HTTP; bind to localhost in any shared env)
+    volumes:
+      - artemis-data:/var/lib/artemis-instance/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bin/artemis check node --up
+          --url 'tcp://localhost:61617?sslEnabled=true;trustStorePath=/var/lib/artemis-instance/etc/broker.p12;trustStorePassword=${BROKER_TLS_PASSWORD};trustStoreType=PKCS12'
+          --user "$${ARTEMIS_USER}" --password "$${ARTEMIS_PASSWORD}"
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  artemis-data:
+    name: bnmb-artemis-data
